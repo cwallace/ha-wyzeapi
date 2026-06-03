@@ -6,7 +6,10 @@ import json
 import logging
 from typing import Any
 
+from aiohttp.client_exceptions import ClientConnectionError
 from wyzeapy import Wyzeapy
+from wyzeapy.exceptions import AccessTokenError, ParameterError, UnknownApiError
+from wyzeapy.services.air_purifier_service import AirPurifier, AirPurifierService
 from wyzeapy.services.camera_service import Camera
 from wyzeapy.services.irrigation_service import Irrigation, IrrigationService
 from wyzeapy.services.lock_service import Lock
@@ -26,6 +29,7 @@ from homeassistant.const import (
     UnitOfEnergy,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -46,6 +50,7 @@ from .token_manager import token_exception_handler
 
 _LOGGER = logging.getLogger(__name__)
 ATTRIBUTION = "Data provided by Wyze"
+SCAN_INTERVAL = datetime.timedelta(seconds=30)
 CAMERAS_WITH_BATTERIES = ["WVOD1", "HL_WCO2", "AN_RSCW", "GW_BE1"]
 OUTDOOR_PLUGS = ["WLPPO"]
 
@@ -71,6 +76,7 @@ async def async_setup_entry(
     camera_service = await client.camera_service
     switch_usage_service = await client.switch_usage_service
     irrigation_service = await client.irrigation_service
+    air_purifier_service = await client.air_purifier_service
 
     locks = await lock_service.get_locks()
     sensors = []
@@ -94,6 +100,12 @@ async def async_setup_entry(
         if plug.product_model in OUTDOOR_PLUGS:
             sensors.append(WyzePlugEnergySensor(plug, switch_usage_service))
             sensors.append(WyzePlugDailyEnergySensor(plug))
+
+    air_purifiers = await air_purifier_service.get_air_purifiers()
+    sensors.extend(
+        WyzeAirPurifierAQISensor(air_purifier_service, air_purifier)
+        for air_purifier in air_purifiers
+    )
 
     # Get all irrigation devices
     irrigation_devices = await irrigation_service.get_irrigations()
@@ -624,3 +636,69 @@ class WyzeIrrigationSSID(WyzeIrrigationBaseSensor):
     def native_value(self) -> str:
         """Return the SSID."""
         return self._device.ssid
+
+
+class WyzeAirPurifierAQISensor(SensorEntity):
+    """Representation of a Wyze Air Purifier AQI sensor."""
+
+    _attr_attribution = ATTRIBUTION
+    _attr_device_class = SensorDeviceClass.AQI
+    _attr_has_entity_name = True
+    _attr_name = "AQI"
+    _attr_should_poll = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 0
+
+    def __init__(
+        self,
+        air_purifier_service: AirPurifierService,
+        air_purifier: AirPurifier,
+    ) -> None:
+        """Initialize the AQI sensor."""
+        self._air_purifier_service = air_purifier_service
+        self._air_purifier = air_purifier
+        self._attr_unique_id = f"{self._air_purifier.mac}-aqi"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        """Return device information about this entity."""
+        device_info = DeviceInfo(
+            identifiers={(DOMAIN, self._air_purifier.mac)},
+            name=self._air_purifier.nickname,
+            manufacturer="WyzeLabs",
+            model=self._air_purifier.product_model,
+        )
+        if self._air_purifier.app_version:
+            device_info["sw_version"] = self._air_purifier.app_version
+        if self._air_purifier.sn:
+            device_info["serial_number"] = self._air_purifier.sn
+        if self._air_purifier.wifi_mac:
+            device_info["connections"] = {
+                (dr.CONNECTION_NETWORK_MAC, self._air_purifier.wifi_mac)
+            }
+        return device_info
+
+    @property
+    def available(self) -> bool:
+        """Return the connection status of this sensor."""
+        return self._air_purifier.available
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current AQI value."""
+        return self._air_purifier.aqi
+
+    @token_exception_handler
+    async def async_update(self) -> None:
+        """Update the AQI sensor."""
+        try:
+            self._air_purifier = await self._air_purifier_service.update(
+                self._air_purifier
+            )
+            self._air_purifier = await self._air_purifier_service.update_air_quality(
+                self._air_purifier
+            )
+        except (AccessTokenError, ParameterError, UnknownApiError) as err:
+            raise HomeAssistantError(f"Wyze returned an error: {err.args}") from err
+        except ClientConnectionError as err:
+            raise HomeAssistantError(err) from err
