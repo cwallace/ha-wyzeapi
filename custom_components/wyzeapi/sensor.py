@@ -102,10 +102,11 @@ async def async_setup_entry(
             sensors.append(WyzePlugDailyEnergySensor(plug))
 
     air_purifiers = await air_purifier_service.get_air_purifiers()
-    sensors.extend(
-        WyzeAirPurifierAQISensor(air_purifier_service, air_purifier)
-        for air_purifier in air_purifiers
-    )
+    for air_purifier in air_purifiers:
+        sensors.append(WyzeAirPurifierAQISensor(air_purifier_service, air_purifier))
+        sensors.append(
+            WyzeAirPurifierHourlyMaxAQISensor(air_purifier_service, air_purifier)
+        )
 
     # Get all irrigation devices
     irrigation_devices = await irrigation_service.get_irrigations()
@@ -638,13 +639,12 @@ class WyzeIrrigationSSID(WyzeIrrigationBaseSensor):
         return self._device.ssid
 
 
-class WyzeAirPurifierAQISensor(SensorEntity):
-    """Representation of a Wyze Air Purifier AQI sensor."""
+class WyzeAirPurifierAirQualitySensor(SensorEntity):
+    """Base class for Wyze Air Purifier air quality sensors."""
 
     _attr_attribution = ATTRIBUTION
     _attr_device_class = SensorDeviceClass.AQI
     _attr_has_entity_name = True
-    _attr_name = "AQI"
     _attr_should_poll = True
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 0
@@ -657,7 +657,6 @@ class WyzeAirPurifierAQISensor(SensorEntity):
         """Initialize the AQI sensor."""
         self._air_purifier_service = air_purifier_service
         self._air_purifier = air_purifier
-        self._attr_unique_id = f"{self._air_purifier.mac}-aqi"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -684,9 +683,12 @@ class WyzeAirPurifierAQISensor(SensorEntity):
         return self._air_purifier.available
 
     @property
-    def native_value(self) -> int | None:
-        """Return the current AQI value."""
-        return self._air_purifier.aqi
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return device attributes of the entity."""
+        return {
+            ATTR_ATTRIBUTION: ATTRIBUTION,
+            "device model": self._air_purifier.product_model,
+        }
 
     @token_exception_handler
     async def async_update(self) -> None:
@@ -702,3 +704,84 @@ class WyzeAirPurifierAQISensor(SensorEntity):
             raise HomeAssistantError(f"Wyze returned an error: {err.args}") from err
         except ClientConnectionError as err:
             raise HomeAssistantError(err) from err
+
+
+class WyzeAirPurifierAQISensor(WyzeAirPurifierAirQualitySensor):
+    """Representation of a Wyze Air Purifier current AQI sensor."""
+
+    _attr_name = "Current AQI"
+
+    def __init__(
+        self,
+        air_purifier_service: AirPurifierService,
+        air_purifier: AirPurifier,
+    ) -> None:
+        """Initialize the current AQI sensor."""
+        super().__init__(air_purifier_service, air_purifier)
+        self._attr_unique_id = f"{self._air_purifier.mac}-aqi"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the current AQI value."""
+        return self._air_purifier.aqi
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return device attributes of the entity."""
+        attributes = super().extra_state_attributes
+        attributes["source"] = "get_air_prop.aqi"
+        return attributes
+
+
+class WyzeAirPurifierHourlyMaxAQISensor(WyzeAirPurifierAirQualitySensor):
+    """Representation of a Wyze Air Purifier hourly max AQI sensor."""
+
+    _attr_name = "Hourly Max AQI"
+
+    def __init__(
+        self,
+        air_purifier_service: AirPurifierService,
+        air_purifier: AirPurifier,
+    ) -> None:
+        """Initialize the hourly max AQI sensor."""
+        super().__init__(air_purifier_service, air_purifier)
+        self._attr_unique_id = f"{self._air_purifier.mac}-hourly-max-aqi"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the hourly max AQI value."""
+        return self._air_purifier.max_hourly_aqi
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return device attributes of the entity."""
+        attributes = super().extra_state_attributes
+        attributes.update(
+            {
+                "source": "query_air_history.max_aqi",
+                "hour_start": self._timestamp_attribute(
+                    self._air_purifier.max_hourly_aqi_start_time
+                ),
+                "hour_end": self._timestamp_attribute(
+                    self._air_purifier.max_hourly_aqi_start_time,
+                    offset=datetime.timedelta(hours=1),
+                ),
+                "sampled_until": self._timestamp_attribute(
+                    self._air_purifier.max_hourly_aqi_end_time
+                ),
+            }
+        )
+        return attributes
+
+    @staticmethod
+    def _timestamp_attribute(
+        timestamp: int | None, offset: datetime.timedelta | None = None
+    ) -> str | None:
+        """Return an ISO formatted timestamp attribute."""
+        if timestamp is None:
+            return None
+
+        value = datetime.datetime.fromtimestamp(timestamp, datetime.UTC)
+        if offset is not None:
+            value += offset
+        return value.isoformat()
