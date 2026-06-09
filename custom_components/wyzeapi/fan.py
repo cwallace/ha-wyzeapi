@@ -1,7 +1,6 @@
 """Platform for fan integration."""
 
 from collections.abc import Callable
-from datetime import timedelta
 import logging
 from typing import Any
 
@@ -18,18 +17,18 @@ from homeassistant.components.fan import FanEntity, FanEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers import device_registry as dr
 from homeassistant.util.percentage import (
     ordered_list_item_to_percentage,
     percentage_to_ordered_list_item,
 )
 
-from .const import CONF_CLIENT, DOMAIN
+from .const import AIR_PURIFIER_UPDATED, CONF_CLIENT, DOMAIN
 from .token_manager import token_exception_handler
 
 _LOGGER = logging.getLogger(__name__)
 ATTRIBUTION = "Data provided by Wyze"
-SCAN_INTERVAL = timedelta(seconds=30)
 
 ORDERED_NAMED_FAN_SPEEDS = [
     AirPurifierFanMode.MIN.value,
@@ -242,7 +241,17 @@ class WyzeAirPurifierFan(FanEntity):
     def async_update_callback(self, air_purifier: AirPurifier) -> None:
         """Update the fan state."""
         self._air_purifier = air_purifier
+        self._dispatch_update()
         self.async_schedule_update_ha_state()
+
+    @callback
+    def _dispatch_update(self) -> None:
+        """Notify sibling air purifier entities of device updates."""
+        async_dispatcher_send(
+            self.hass,
+            f"{AIR_PURIFIER_UPDATED}-{self._air_purifier.mac}",
+            self._air_purifier,
+        )
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to update events."""

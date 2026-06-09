@@ -11,7 +11,7 @@
   "issue_tracker": "https://github.com/SecKatie/ha-wyzeapi/issues",
   "loggers": ["custom_components.wyzeapi"],
   "requirements": [
-    "wyzeapy @ https://github.com/cwallace/wyzeapy/archive/a37334838380aadd872db59891e005945ee302ad.zip",
+    "wyzeapy @ https://github.com/cwallace/wyzeapy/archive/refs/heads/codex/air-purifier-aqi-refresh.zip",
     "websockets"
   ],
   "version": "0.1.38"

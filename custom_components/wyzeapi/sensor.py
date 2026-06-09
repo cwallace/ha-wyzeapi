@@ -6,10 +6,8 @@ import json
 import logging
 from typing import Any
 
-from aiohttp.client_exceptions import ClientConnectionError
 from wyzeapy import Wyzeapy
-from wyzeapy.exceptions import AccessTokenError, ParameterError, UnknownApiError
-from wyzeapy.services.air_purifier_service import AirPurifier, AirPurifierService
+from wyzeapy.services.air_purifier_service import AirPurifier
 from wyzeapy.services.camera_service import Camera
 from wyzeapy.services.irrigation_service import Irrigation, IrrigationService
 from wyzeapy.services.lock_service import Lock
@@ -29,7 +27,6 @@ from homeassistant.const import (
     UnitOfEnergy,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo
@@ -40,6 +37,7 @@ from homeassistant.helpers.event import (
 )
 
 from .const import (
+    AIR_PURIFIER_UPDATED,
     CAMERA_UPDATED,
     CONF_CLIENT,
     DOMAIN,
@@ -50,7 +48,6 @@ from .token_manager import token_exception_handler
 
 _LOGGER = logging.getLogger(__name__)
 ATTRIBUTION = "Data provided by Wyze"
-SCAN_INTERVAL = datetime.timedelta(seconds=30)
 CAMERAS_WITH_BATTERIES = ["WVOD1", "HL_WCO2", "AN_RSCW", "GW_BE1"]
 OUTDOOR_PLUGS = ["WLPPO"]
 
@@ -103,10 +100,8 @@ async def async_setup_entry(
 
     air_purifiers = await air_purifier_service.get_air_purifiers()
     for air_purifier in air_purifiers:
-        sensors.append(WyzeAirPurifierAQISensor(air_purifier_service, air_purifier))
-        sensors.append(
-            WyzeAirPurifierHourlyMaxAQISensor(air_purifier_service, air_purifier)
-        )
+        sensors.append(WyzeAirPurifierAQISensor(air_purifier))
+        sensors.append(WyzeAirPurifierHourlyMaxAQISensor(air_purifier))
 
     # Get all irrigation devices
     irrigation_devices = await irrigation_service.get_irrigations()
@@ -645,17 +640,15 @@ class WyzeAirPurifierAirQualitySensor(SensorEntity):
     _attr_attribution = ATTRIBUTION
     _attr_device_class = SensorDeviceClass.AQI
     _attr_has_entity_name = True
-    _attr_should_poll = True
+    _attr_should_poll = False
     _attr_state_class = SensorStateClass.MEASUREMENT
     _attr_suggested_display_precision = 0
 
     def __init__(
         self,
-        air_purifier_service: AirPurifierService,
         air_purifier: AirPurifier,
     ) -> None:
         """Initialize the AQI sensor."""
-        self._air_purifier_service = air_purifier_service
         self._air_purifier = air_purifier
 
     @property
@@ -690,20 +683,21 @@ class WyzeAirPurifierAirQualitySensor(SensorEntity):
             "device model": self._air_purifier.product_model,
         }
 
-    @token_exception_handler
-    async def async_update(self) -> None:
-        """Update the AQI sensor."""
-        try:
-            self._air_purifier = await self._air_purifier_service.update(
-                self._air_purifier
+    @callback
+    def handle_air_purifier_update(self, air_purifier: AirPurifier) -> None:
+        """Handle air purifier updates."""
+        self._air_purifier = air_purifier
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        """Add listener on startup."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{AIR_PURIFIER_UPDATED}-{self._air_purifier.mac}",
+                self.handle_air_purifier_update,
             )
-            self._air_purifier = await self._air_purifier_service.update_air_quality(
-                self._air_purifier
-            )
-        except (AccessTokenError, ParameterError, UnknownApiError) as err:
-            raise HomeAssistantError(f"Wyze returned an error: {err.args}") from err
-        except ClientConnectionError as err:
-            raise HomeAssistantError(err) from err
+        )
 
 
 class WyzeAirPurifierAQISensor(WyzeAirPurifierAirQualitySensor):
@@ -713,24 +707,16 @@ class WyzeAirPurifierAQISensor(WyzeAirPurifierAirQualitySensor):
 
     def __init__(
         self,
-        air_purifier_service: AirPurifierService,
         air_purifier: AirPurifier,
     ) -> None:
         """Initialize the current AQI sensor."""
-        super().__init__(air_purifier_service, air_purifier)
+        super().__init__(air_purifier)
         self._attr_unique_id = f"{self._air_purifier.mac}-aqi"
 
     @property
     def native_value(self) -> int | None:
         """Return the current AQI value."""
         return self._air_purifier.aqi
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return device attributes of the entity."""
-        attributes = super().extra_state_attributes
-        attributes["source"] = "get_air_prop.aqi"
-        return attributes
 
 
 class WyzeAirPurifierHourlyMaxAQISensor(WyzeAirPurifierAirQualitySensor):
@@ -740,11 +726,10 @@ class WyzeAirPurifierHourlyMaxAQISensor(WyzeAirPurifierAirQualitySensor):
 
     def __init__(
         self,
-        air_purifier_service: AirPurifierService,
         air_purifier: AirPurifier,
     ) -> None:
         """Initialize the hourly max AQI sensor."""
-        super().__init__(air_purifier_service, air_purifier)
+        super().__init__(air_purifier)
         self._attr_unique_id = f"{self._air_purifier.mac}-hourly-max-aqi"
 
     @property
@@ -758,7 +743,6 @@ class WyzeAirPurifierHourlyMaxAQISensor(WyzeAirPurifierAirQualitySensor):
         attributes = super().extra_state_attributes
         attributes.update(
             {
-                "source": "query_air_history.max_aqi",
                 "hour_start": self._timestamp_attribute(
                     self._air_purifier.max_hourly_aqi_start_time
                 ),
